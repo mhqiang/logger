@@ -11,7 +11,7 @@ func TestLogger(t *testing.T) {
 	config.MaxLogSize = 100
 	config.ServiceName = "test"
 	config.Level = "warn"
-	config.NotDisplayLine = true
+	// config.NotDisplayLine = true
 	Init(&config)
 	Info("aaa")
 	Error("bbb")
