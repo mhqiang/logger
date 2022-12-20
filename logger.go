@@ -7,35 +7,152 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mcuadros/go-defaults"
 	"github.com/natefinch/lumberjack"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
 
+type Option func(c *Config)
+
 // Config .
 type Config struct {
-	Level          string `toml:"level"`
-	LogPath        string `toml:"log_path"`
-	MaxLogSize     int    `toml:"max_log_size"`
-	ServiceName    string `toml:"service_name,omitempty"`
+	Level          string `default:"info" toml:"level"`
+	LogPath        string `default:"logs" toml:"log_path"`
+	MaxLogSize     int    `default:"100" toml:"max_log_size"`
+	ServiceName    string `default:"test" toml:"service_name,omitempty"`
 	InfoOutput     string `toml:"info_log_file"`
 	ErrorOutput    string `toml:"error_log_file"`
 	DebugOutput    string `toml:"debug_log_file"`
-	NotDisplayLine bool   `toml:"not_display_file_linenum"`
+	NotDisplayLine bool   `default:"false" toml:"not_display_file_linenum"`
+	Stdout         bool   `default:"true" toml:"not_stdout"`
+
+	MaxBackup int  `default:"100" toml:"max_backup"`
+	MaxAge    int  `default:"7" toml:"max_age"`
+	Compress  bool `default:"true" toml:"compress"`
 }
 
-func (c *Config) SetNotDisplayLinNum() {
-	c.NotDisplayLine = true
+func (config *Config) NewLogger() error {
+
+	level := new(zapcore.Level)
+	err := level.UnmarshalText([]byte(config.Level))
+	if err != nil {
+		return err
+	}
+
+	maxSize := config.MaxLogSize
+	maxBackups := config.MaxLogSize
+	maxAge := config.MaxAge
+	compress := config.Compress
+
+	var infoPath, debugPath, errPath string
+
+	if _, err := os.Stat(config.LogPath); os.IsNotExist(err) {
+		os.Mkdir(config.LogPath, 0755)
+	}
+
+	if len(config.LogPath) == 0 {
+		config.LogPath = "logs"
+	}
+	infoPath = fmt.Sprintf("%s/%v.log", config.LogPath, config.ServiceName)
+	if config.InfoOutput != "" {
+		infoPath = config.InfoOutput
+	}
+	sugarInfoLogger = createLogger(infoPath, *level,
+		maxSize, maxBackups, maxAge, compress, config.Stdout, config.NotDisplayLine)
+	sugarInfoPath = infoPath
+
+	sugarDebugLogger = sugarInfoLogger
+	sugarDebugPath = infoPath
+
+	sugarErrorLogger = sugarInfoLogger
+	sugarErrPath = infoPath
+
+	sugarWarnLogger = sugarInfoLogger
+	sugarWarnPath = infoPath
+
+	if config.DebugOutput != "" {
+		debugPath = config.DebugOutput
+		sugarDebugLogger = createLogger(debugPath, *level,
+			maxSize, maxBackups, maxAge, compress, config.Stdout, config.NotDisplayLine)
+		sugarDebugPath = debugPath
+	}
+
+	if config.ErrorOutput != "" {
+		errPath = config.ErrorOutput
+		sugarErrorLogger = createLogger(errPath, *level,
+			maxSize, maxBackups, maxAge, compress, config.Stdout, config.NotDisplayLine)
+		sugarErrPath = errPath
+	}
+
+	// logger = zap.New(core, zap.AddCaller(), zap.Development(), zap.Fields(zap.String("serviceName", serviceName)))
+	return nil
+}
+
+func WithNotDisplayLineNum(flag bool) Option {
+	return func(c *Config) {
+		c.NotDisplayLine = flag
+	}
+}
+
+func WithStdout(flag bool) Option {
+	return func(c *Config) {
+		c.Stdout = flag
+	}
+}
+
+func WithLevel(level string) Option {
+	return func(c *Config) {
+		c.Level = level
+	}
+}
+
+func WithInfoPath(path string) Option {
+	return func(c *Config) {
+		c.LogPath = path
+	}
+}
+
+func WithDebugPath(path string) Option {
+	return func(c *Config) {
+		c.DebugOutput = path
+	}
+}
+
+func WithServiceName(name string) Option {
+	return func(c *Config) {
+		c.ServiceName = name
+	}
+}
+
+func WithErrPath(path string) Option {
+	return func(c *Config) {
+		c.ErrorOutput = path
+	}
+}
+
+func InitDefaultLogger(ops ...Option) {
+	DefaultConfig = new(Config)
+	defaults.SetDefaults(DefaultConfig)
+	for _, op := range ops {
+		op(DefaultConfig)
+	}
+
+	DefaultConfig.NewLogger()
 }
 
 // var logger *zap.Logger
 var (
+	DefaultConfig *Config
+
 	sugarInfoLogger  *zap.SugaredLogger
 	sugarInfoPath    string
 	sugarDebugLogger *zap.SugaredLogger
 	sugarDebugPath   string
 	sugarErrorLogger *zap.SugaredLogger
 	sugarErrPath     string
+	sugarWarnLogger  *zap.SugaredLogger
+	sugarWarnPath    string
 )
 
 func GetInfoLogPath() string {
@@ -48,6 +165,10 @@ func GetDebugLogPath() string {
 
 func GetErrLogPath() string {
 	return sugarErrPath
+}
+
+func GetWarnLogPath() string {
+	return sugarWarnPath
 }
 
 func formatArgs(v ...interface{}) string {
@@ -83,7 +204,7 @@ func Errorln(v ...interface{}) {
 
 func Warn(v ...interface{}) {
 	format := formatArgs(v)
-	sugarErrorLogger.Warn("", fmt.Sprintf(format, v...))
+	sugarWarnLogger.Warn("", fmt.Sprintf(format, v...))
 }
 
 func Debug(v ...interface{}) {
@@ -96,20 +217,9 @@ func Panic(v ...interface{}) {
 	sugarErrorLogger.Panic("", fmt.Sprintf(format, v...))
 }
 
-func Init(config *Config) error {
-	level := new(zapcore.Level)
-	err := level.UnmarshalText([]byte(config.Level))
-	if err != nil {
-		return err
-	}
-
-	NewLogger(*level, int(config.MaxLogSize), 100, 7, true, config)
-	return nil
-}
-
 func createLogger(path string, level zapcore.Level, maxSize int, maxBackups int,
-	maxAge int, compress bool, notDisplayLine bool) *zap.SugaredLogger {
-	core := newCore(path, level, maxSize, maxBackups, maxAge, compress)
+	maxAge int, compress, stdout, notDisplayLine bool) *zap.SugaredLogger {
+	core := newCore(path, level, maxSize, maxBackups, maxAge, compress, stdout)
 
 	var logger *zap.Logger
 	if !notDisplayLine {
@@ -122,52 +232,11 @@ func createLogger(path string, level zapcore.Level, maxSize int, maxBackups int,
 	return logger.Sugar()
 }
 
-func NewLogger(level zapcore.Level, maxSize int, maxBackups int,
-	maxAge int, compress bool, config *Config) {
-	var infoPath, debugPath, errPath string
-
-	if _, err := os.Stat(config.LogPath); os.IsNotExist(err) {
-		os.Mkdir(config.LogPath, 0755)
-	}
-
-	if len(config.LogPath) == 0 {
-		config.LogPath = "logs"
-	}
-	infoPath = fmt.Sprintf("%s/%v.log", config.LogPath, config.ServiceName)
-	if config.InfoOutput != "" {
-		infoPath = config.InfoOutput
-	}
-	sugarInfoLogger = createLogger(infoPath, level,
-		maxSize, maxBackups, maxAge, compress, config.NotDisplayLine)
-	sugarInfoPath = infoPath
-
-	sugarDebugLogger = sugarInfoLogger
-	sugarDebugPath = infoPath
-
-	sugarErrorLogger = sugarInfoLogger
-	sugarErrPath = infoPath
-
-	if config.DebugOutput != "" {
-		debugPath = config.DebugOutput
-		sugarDebugLogger = createLogger(debugPath, level,
-			maxSize, maxBackups, maxAge, compress, config.NotDisplayLine)
-		sugarDebugPath = debugPath
-	}
-
-	if config.ErrorOutput != "" {
-		errPath = config.ErrorOutput
-		sugarErrorLogger = createLogger(errPath, level,
-			maxSize, maxBackups, maxAge, compress, config.NotDisplayLine)
-		sugarErrPath = errPath
-	}
-
-	// logger = zap.New(core, zap.AddCaller(), zap.Development(), zap.Fields(zap.String("serviceName", serviceName)))
-}
-
 /**
  * zapcore构造
  */
-func newCore(filePath string, level zapcore.Level, maxSize int, maxBackups int, maxAge int, compress bool) zapcore.Core {
+func newCore(filePath string, level zapcore.Level, maxSize int, maxBackups int,
+	maxAge int, compress, stdout bool) zapcore.Core {
 	//日志文件路径配置2
 	hook := lumberjack.Logger{
 		Filename:   filePath,   // 日志文件路径
@@ -194,15 +263,22 @@ func newCore(filePath string, level zapcore.Level, maxSize int, maxBackups int, 
 		EncodeCaller:   zapcore.FullCallerEncoder,      // 全路径编码器
 		EncodeName:     zapcore.FullNameEncoder,
 	}
+	var syncer zapcore.WriteSyncer
+	if stdout {
+		syncer = zapcore.NewMultiWriteSyncer(zapcore.AddSync(&hook), zapcore.AddSync(os.Stdout))
+	} else {
+		syncer = zapcore.NewMultiWriteSyncer(zapcore.AddSync(&hook))
+	}
 	return zapcore.NewCore(
 		// zapcore.NewJSONEncoder(encoderConfig),               // 编码器json配置
+
 		zapcore.NewConsoleEncoder(encoderConfig), // 编码器设置成date  level linenum msg 不需要key
 		// zapcore.NewMultiWriteSyncer(zapcore.AddSync(os.Stdout), // 打印控制台
-		zapcore.NewMultiWriteSyncer(zapcore.AddSync(&hook)), // 打印文件
+		syncer,      // 打印文件
 		atomicLevel, // 日志级别
 	)
 }
 
 func TimeEncoder(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
-	enc.AppendString(t.Format("2006-01-02 15:04:05.000"))
+	enc.AppendString(t.Format("2006-01-02T15:04:05.000"))
 }

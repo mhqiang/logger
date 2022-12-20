@@ -1,18 +1,17 @@
 package logger
 
 import (
+	"fmt"
 	"testing"
 )
 
 func TestLogger(t *testing.T) {
 
-	var config Config
+	InitDefaultLogger()
+	config := DefaultConfig
 
-	config.MaxLogSize = 100
-	config.ServiceName = "test"
-	config.Level = "warn"
-	// config.NotDisplayLine = true
-	Init(&config)
+	fmt.Println(config.LogPath, config.Compress, config.NotDisplayLine, config.Stdout)
 	Info("aaa")
 	Error("bbb")
+
 }
